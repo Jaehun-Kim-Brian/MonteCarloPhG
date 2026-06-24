@@ -6,17 +6,17 @@ from scipy.stats import gamma
 from scipy.special import spherical_jn, spherical_yn
 
 
-def get_q(n_eff, theta_array, wavelength):
+def get_q(n_eff, theta_array, wavelength): # 
     q_array = 4 * np.pi * n_eff * np.sin(theta_array / 2.0) / wavelength
     return q_array
 
-def get_np_real(wavelength):
+def get_np_real(wavelength): #
     # wavelength in um scale
     n_p_real = np.sqrt(1 + (1.4435 * wavelength**2) / (wavelength**2 - 0.020216))
     return n_p_real
 
 # --- Bruggeman 유효 굴절률 계산 함수 ---
-def get_effective_index_complex(n_p_complex, n_med_complex, phi):
+def get_effective_index_complex(n_p_complex, n_med_complex, phi): #
     eps_p = n_p_complex**2
     eps_med = n_med_complex**2
     
@@ -29,7 +29,7 @@ def get_effective_index_complex(n_p_complex, n_med_complex, phi):
         n_eff = -n_eff
     return n_eff
 
-def riccati_bessel(n, z):
+def riccati_bessel(n, z): #
     # 복소수 z에 대한 Riccati-Bessel 함수와 도홤수 계산
     jn = spherical_jn(n, z)
     yn = spherical_yn(n, z)
@@ -527,7 +527,60 @@ def interface_infilm(u_x, u_y, u_z, coarse_roughness, is_top, n_i, n_t):
     
     else:
         return 0.0, 0.0, 0.0, False
+    
+# for the incident light, 
+def interface_enter_new(u_x, u_y, u_z, coarse_roughness, n_i, n_t):      
+    norm_vec = get_norm_vec(coarse_roughness)
+    cos_i = u_x * norm_vec[0] + u_y * norm_vec[1] + u_z * norm_vec[2]
+    if cos_i < 0: # as, norm vector always faces inside of the film, inner poduct of inc_vec and norm_vec should be positive
+        norm_vec = -1 * norm_vec
+        cos_i = abs(cos_i)
+        
+        
+    R_f = calculate_fresnel(n_i, n_t, cos_i) # return the fraction of reflected light. If TIR, return 1.0
+    # In case of ligth entering into film, we have to return only transmitted direction vector and R_f
+    
+    if R_f >= 1.0: # as light reflected before it tranmitted to the film, we don't have to return actual direction vector value
+        return 0.0, 0.0, 0.0, 1.0
+    
+    else: 
+        eta = n_i / n_t
+        
+        # Snell's Law
+        # It doesn't occur error, because function 'calculate_fresnel' already confirmed TIR condition
+        theta_i = np.arccos(min(1.0, cos_i))
+        sin_t = np.sin(theta_i) * eta
+        
+        vec_t_p_x = eta * (u_x - norm_vec[0] * cos_i)
+        vec_t_p_y = eta * (u_y - norm_vec[1] * cos_i)
+        vec_t_p_z = eta * (u_z - norm_vec[2] * cos_i)
+        vec_t_parallel = [vec_t_p_x, vec_t_p_y, vec_t_p_z]
+        vec_t_vertical = np.sqrt(1 - sin_t ** 2) * norm_vec
+        vec_trans = vec_t_parallel + vec_t_vertical
+        
+        return vec_trans[0], vec_trans[1], abs(vec_trans[2]), R_f
 
+# n_i is index of film and n_t is index of medium(Air)
+def interface_infilm_new(u_x, u_y, u_z, coarse_roughness, is_top, n_i, n_t):
+    sign = -1 if is_top else 1
+    # norm vector is positive when bottom,  negative when top
+    norm_vec = get_norm_vec(coarse_roughness) * sign # norm vector always heads outside of the film
+    cos_i = u_x * norm_vec[0] + u_y * norm_vec[1] + u_z * norm_vec[2]
+    if cos_i < 0: # as, norm vector always faces inside of the film, inner poduct of inc_vec and norm_vec should be positive
+        cos_i = abs(cos_i)
+        norm_vec = norm_vec * -1
+    
+    # as n_i > n_t for this case, we should consider TIR actually
+    R_f = calculate_fresnel(n_i, n_t, cos_i) # return the fraction of reflected light. If TIR, return 1.0
+    # And the direction vector we should return is the reflected direction vector
+    
+    
+    ref_x = u_x - 2 * norm_vec[0] * cos_i
+    ref_y = u_y - 2 * norm_vec[1] * cos_i
+    ref_z = u_z - 2 * norm_vec[2] * cos_i
+    ref_z = abs(ref_z) * sign * -1
+    return ref_x, ref_y, ref_z, R_f
+    
 
 # --- Monte Carlo 포톤 패킷날리기 함수 ---
 def run_mc(N_photons, film_thickness, mu_a,
@@ -561,8 +614,8 @@ def run_mc(N_photons, film_thickness, mu_a,
         # 입사각에 따른 방향 벡터 (u_x, u_y, u_z)
 
         # 밖(n_m)에서 안(n_eff)으로 들어올 때 표면이 기울어져 있으면 빛이 꺾임
-        u_x, u_y, u_z, is_reflected = interface_enter(u_x, u_y, u_z, coarse_roughness, n_med, n_eff)
         
+        u_x, u_y, u_z, is_reflected = interface_enter(u_x, u_y, u_z, coarse_roughness, n_med, n_eff)
         if is_reflected:
             reflected += 1.0
             continue
@@ -619,6 +672,7 @@ def run_mc(N_photons, film_thickness, mu_a,
                     
                 remaining_path = step_size * (1.0 - frac_before)
                 
+                
                 if is_reflected:
                     z_hit = 0.0 if is_top else film_thickness
                     u_x, u_y, u_z = u_x_new, u_y_new, u_z_new
@@ -632,8 +686,6 @@ def run_mc(N_photons, film_thickness, mu_a,
                     else: transmitted += W_final
                     break
                     
-                    
-                
                 # 에러 디버깅용
                 if hit_boundary == True:
                     if is_top == True and u_z_new <0:
@@ -643,7 +695,6 @@ def run_mc(N_photons, film_thickness, mu_a,
                 
             else: 
                 x, y, z = next_x, next_y, next_z
-
             total_moving += step_size
                     
                 
@@ -675,7 +726,7 @@ def run_mc(N_photons, film_thickness, mu_a,
         
     R = reflected / N_photons
     T = transmitted / N_photons
-    print(top_touch, bot_touch)
+    #print(top_touch, bot_touch)
     return R, T
 
 def run_all_mc(filename, wvls, r_i,
@@ -740,7 +791,7 @@ if __name__=="__main__":
     phi = film[1]
     fine_roughness = film[2]
     coarse_roughness = film[3]
-    filename = f"phg_mc/file/mc_{int(film_thickness)}um_ver12"
+    filename = f"phg_mc/file/mc_{int(film_thickness)}um_ver13"
     print(filename)
     run_all_mc(filename=filename, wvls=wvls, r_i = r_i,
                N_photons=20000, film_thickness=film_thickness, k_p=2e-5,   
