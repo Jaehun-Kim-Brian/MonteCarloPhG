@@ -385,6 +385,10 @@ class PhotonicGlassMCSimulator:
     def _get_l_scat(self, csca_sample):
         rho = (self.phi * 3.0) / (4.0* np.pi * self.r_i**3)
         return 1.0 / (rho * csca_sample)
+        
+    def _get_l_star(self, l_scat, theta_pdf, theta_array):
+        g = np.trapezoid(np.cos(theta_array) * theta_pdf, theta_array)
+        return l_scat / (1.0 - g)
     
     def _get_phase_func_ginoza(self, wavelength, theta_array, backend="internal", radius_samples=None, size_pdf=None):
         theta_array = np.asarray(theta_array, dtype=float)
@@ -452,11 +456,7 @@ class PhotonicGlassMCSimulator:
         phase_function = diff_csca_sample / csca_sample
 
         # Optional: renormalize once more to suppress small numerical drift
-        norm_check = 2.0 * np.pi * np.trapezoid(
-            phase_function * np.sin(theta_array),
-            theta_array
-        )
-
+        norm_check = 2.0 * np.pi * np.trapezoid(phase_function * np.sin(theta_array), theta_array)
         if not np.isfinite(norm_check) or norm_check <= 0.0:
             raise ValueError(f"Invalid phase-function normalization: {norm_check}")
 
