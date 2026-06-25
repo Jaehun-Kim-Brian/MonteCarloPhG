@@ -266,22 +266,31 @@ class PhotonicGlassMCSimulator:
         S1 = np.zeros_like(theta_array, dtype=complex)
         S2 = np.zeros_like(theta_array, dtype=complex)
 
-        pi_nm2 = np.zeros_like(theta_array, dtype=float)  # pi_0
-        pi_nm1 = np.ones_like(theta_array, dtype=float)   # pi_1
+        pi_0 = np.zeros_like(theta_array, dtype=float)
+        pi_1 = np.ones_like(theta_array, dtype=float)
+
+        pi_nm2 = pi_0
+        pi_nm1 = pi_1
 
         for idx, ni in enumerate(n):
             if ni == 1:
-                pi_n = pi_nm1
+                pi_n = pi_1
+                pi_n_minus_1 = pi_0
             else:
-                pi_n = ((2 * ni - 1) / (ni - 1)) * mu * pi_nm1 - (ni / (ni - 1)) * pi_nm2
+                pi_n = (
+                    ((2 * ni - 1) / (ni - 1)) * mu * pi_nm1
+                    - (ni / (ni - 1)) * pi_nm2
+                )
+                pi_n_minus_1 = pi_nm1
 
-            tau_n = ni * mu * pi_n - (ni + 1) * pi_nm1
+            tau_n = ni * mu * pi_n - (ni + 1) * pi_n_minus_1
             prefac = (2 * ni + 1) / (ni * (ni + 1))
 
             S1 += prefac * (a_n[idx] * pi_n + b_n[idx] * tau_n)
             S2 += prefac * (a_n[idx] * tau_n + b_n[idx] * pi_n)
 
-            pi_nm2, pi_nm1 = pi_nm1, pi_n
+            if ni >= 2:
+                pi_nm2, pi_nm1 = pi_nm1, pi_n
 
         # absorbing-medium radial factor at r = a
         # SI description: exp(-2 k'' r) / [ (k' r)^2 + (k'' r)^2 ]
@@ -386,6 +395,7 @@ class PhotonicGlassMCSimulator:
         rho = (self.phi * 3.0) / (4.0* np.pi * self.r_i**3)
         return 1.0 / (rho * csca_sample)
         
+    # Calculate transport length
     def _get_l_star(self, l_scat, theta_pdf, theta_array):
         g = np.trapezoid(np.cos(theta_array) * theta_pdf, theta_array)
         return l_scat / (1.0 - g)

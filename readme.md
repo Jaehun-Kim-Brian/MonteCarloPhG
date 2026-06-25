@@ -53,3 +53,38 @@ Figure 3.C는 두께에 따라 4개의 데이터 라인을 출력합니다. 각 
 | **6 μm** | 0.58 | 0.5 | 0.9 |
 
 > **Note:** 3930 μm 필름은 최대 전송 길이(Transport length)인 47 μm보다 훨씬 두꺼워 강한 다중 산란을 보장하며, 6 μm 필름은 최소 전송 길이인 8 μm보다 얇아 다중 산란을 최소화하도록 설계된 값입니다.
+
+
+## 3. 함수 호출 관계
+
+```
+run_simulation()
+ ├─ optional: _get_schulz_distribution()
+ ├─ _get_n_eff_ps_matrix()
+ │   └─ get_n_p_real_sellmeier()
+ ├─ _get_mu_a()
+ ├─ _get_phase_func_ginoza()
+ │   ├─ get_n_p_real_sellmeier()
+ │   ├─ _get_n_eff_ps_matrix()
+ │   ├─ _get_mie_absorbing()
+ │   │     or _get_polydisperse_form_factor_absorbing()
+ │   │          └─ _get_mie_absorbing() for each radius
+ │   ├─ get_q()
+ │   ├─ _get_structure_factor_ginoza()
+ │   └─ integrate diff_csca_mie * S(q) → csca_sample
+ ├─ _cdf_phase()
+ ├─ _get_l_scat(csca_sample) → l_scat_norm
+ ├─ _get_mie_absorbing() or _get_polydisperse_form_factor_absorbing()
+ ├─ _cdf_phase()
+ ├─ _get_l_scat(csca_mie) → l_scat_surf
+ └─ _run_single_wavelength()
+      └─ _track_single_photon()
+           ├─ _interface_enter()
+           │    ├─ _get_norm_vec()
+           │    └─ _calculate_fresnel()
+           ├─ step sampling with l_scat_norm or l_scat_surf
+           ├─ _interface_infilm()
+           │    ├─ _get_norm_vec()
+           │    └─ _calculate_fresnel()
+           └─ _scatter_direction()
+```
