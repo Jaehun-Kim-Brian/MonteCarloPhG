@@ -84,8 +84,7 @@ class PhotonicGlassMCSimulator:
         
         return n_eff
 
-    # (이하 Mie Scattering, Ginoza Structure Factor, Phase Function 함수들은 
-    # 내부 로직이므로 _get_mie_absorbing 과 같이 언더바(_)를 붙여 캡슐화합니다.)
+
     def _riccati_bessel(self, n, z): 
         # Ref: SI Eq. (12)-(13), Hwang, Stephenson, Barkley, Brandt, Xiao, Aizenberg, and Manoharan,
         # "Designing angle-independent structural colors using Monte Carlo simulations of multiple scattering,"
@@ -1308,6 +1307,38 @@ class PhotonicGlassMCSimulator:
                 
 
 if __name__=="__main__":
-    rho = (0.56 * 3.0) / (4.0* np.pi * 0.138**3)
-    print(rho)
+    sim = PhotonicGlassMCSimulator(
+        film_thickness = 77.0, #um
+        phi = 0.56, 
+        fine_roughness=0.5,
+        coarse_roughness=0.9,
+        r_i=0.138, 
+        n_m=1.0, 
+        k_p=2e-5, 
+        pdi=0.03, 
+        detect_angle=90
+    )
     
+    wvl_array = np.linspace(0.400, 0.800, 1000)
+    theta_array = np.linspace(1e-4, np.pi, 1000)    # radians
+    theta_deg = np.degrees(theta_array)  
+
+    R, T, A, diags = sim.run_simulation(
+        wvls=wvl_array,
+        theta_array=theta_array,
+        N_photons=1000,
+        backend="internal",
+        use_polydispersity=False,
+        return_diagnostics=True,
+    )
+
+    plt.figure(figsize=(7, 4))
+    plt.plot(wvl_array * 1000, R, label="R")
+    plt.plot(wvl_array * 1000, T, label="T")
+    plt.plot(wvl_array * 1000, A, label="A")
+    plt.xlabel("Wavelength [nm]")
+    plt.ylabel("Fraction")
+    plt.title("MC spectrum test: 77 µm film")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
