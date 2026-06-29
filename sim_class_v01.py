@@ -930,7 +930,7 @@ class PhotonicGlassMCSimulator:
         return u_new / np.linalg.norm(u_new)
         
     def _track_single_photon(self, mu_a, l_scat_norm, cdf_norm,
-                             l_scat_surf, cdf_surf, theta_array, 
+                             l_scat_surf, theta_array, 
                              n_eff_real, incident_angle=8.0,
                              max_scatters=10000, min_weight=1e-8, trace=False):
         
@@ -944,7 +944,6 @@ class PhotonicGlassMCSimulator:
     
         theta_array = np.asarray(theta_array, dtype=float)
         cdf_norm = np.asarray(cdf_norm, dtype=float)
-        cdf_surf = np.asarray(cdf_surf, dtype=float)
         
         # Initial Position at top surface
         x, y, z = 0.0, 0.0, 0.0
@@ -994,15 +993,12 @@ class PhotonicGlassMCSimulator:
                 is_first_step = False
                 if np.random.rand() < self.fine_roughness:
                     current_l_scat = l_scat_surf
-                    current_cdf = cdf_surf
                     step_type = "surface_step"
                 else:
                     current_l_scat = l_scat_norm
-                    current_cdf = cdf_norm
                     step_type = "bulk_step"
             else:
                 current_l_scat = l_scat_norm
-                current_cdf = cdf_norm
                 step_type = "bulk_step"
                 
             # Sample exponential step size
@@ -1112,7 +1108,7 @@ class PhotonicGlassMCSimulator:
                 }
 
             rand_cdf = np.random.rand()    
-            scat_theta = np.interp(rand_cdf, current_cdf, theta_array)
+            scat_theta = np.interp(rand_cdf, cdf_norm, theta_array)
             azimuth = 2.0 * np.pi * np.random.rand()     
             
             u = self._scatter_direction(u, scat_theta, azimuth)
@@ -1131,7 +1127,7 @@ class PhotonicGlassMCSimulator:
             "trace": records if trace else None,
         }        
     def _run_single_wavelength(self, N_photons, theta_array, 
-                               mu_a, l_scat_norm, cdf_norm, l_scat_surf, cdf_surf, n_eff_real,
+                               mu_a, l_scat_norm, cdf_norm, l_scat_surf, n_eff_real,
                                return_diagnostics=False):
         """
         단일 파장에 대한 Photon Tracking 루프 (기존 run_mc 역할)
@@ -1151,7 +1147,7 @@ class PhotonicGlassMCSimulator:
             
         for _ in range(N_photons):
             result = self._track_single_photon(mu_a, l_scat_norm, cdf_norm,
-                             l_scat_surf, cdf_surf, theta_array, 
+                             l_scat_surf, theta_array, 
                              n_eff_real, incident_angle=8.0, trace=False)
             
             reflected += result["R"]
@@ -1240,8 +1236,6 @@ class PhotonicGlassMCSimulator:
                 theta_array
             )
             phase_surf = phase_surf / phase_surf_norm
-
-            cdf_surf, theta_pdf_surf = self._cdf_phase(phase_surf, theta_array)
             l_scat_surf = self._get_l_scat(csca_mie)
             
             if return_diagnostics:
@@ -1252,7 +1246,6 @@ class PhotonicGlassMCSimulator:
                     l_scat_norm=l_scat_norm,
                     cdf_norm=cdf_norm,
                     l_scat_surf=l_scat_surf,
-                    cdf_surf=cdf_surf,
                     n_eff_real=n_eff_real,
                     return_diagnostics=True,
                 )
@@ -1275,7 +1268,6 @@ class PhotonicGlassMCSimulator:
                     l_scat_norm=l_scat_norm,
                     cdf_norm=cdf_norm,
                     l_scat_surf=l_scat_surf,
-                    cdf_surf=cdf_surf,
                     n_eff_real=n_eff_real,
                     return_diagnostics=False,
                 )

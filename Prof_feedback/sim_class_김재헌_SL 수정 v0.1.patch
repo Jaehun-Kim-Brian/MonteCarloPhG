@@ -1,0 +1,418 @@
+--- "/mnt/data/sim_class_\341\204\200\341\205\265\341\206\267\341\204\214\341\205\242\341\204\222\341\205\245\341\206\253.py"	2026-06-26 18:00:55.202483617 +0000
++++ /mnt/data/sim_class_pnas_reproduction_fixed.py	2026-06-26 18:11:03.074664336 +0000
+@@ -1,3 +1,4 @@
++# Diagnostic patch for PNAS/Manoharan reproduction: form/structure-factor corrections.
+ import numpy as np
+ import matplotlib.pyplot as plt
+ from tqdm import tqdm
+@@ -10,7 +11,10 @@
+     Photonic Glass 환경에서의 빛의 산란 및 투과/반사를 모사하는 Monte Carlo 시뮬레이터 클래스.
+     """
+     def __init__(self, film_thickness, phi, fine_roughness, coarse_roughness, 
+-                 r_i=0.138, n_m=1.0, k_p=2e-5, pdi=0.03, detect_angle=90, polydispersity=0):
++                 r_i=0.138, n_m=1.0, n_medium=None, k_p=2e-5, pdi=0.03,
++                 detect_angle=90, polydispersity=0, structure_model="auto",
++                 bulk_form_medium="effective", surface_form_medium="matrix",
++                 surface_phase_mode="bulk", random_seed=None):
+         # 1. 시뮬레이션 환경 및 물리적 파라미터 초기화
+         # wvls, N_photons, theta_array 는 아직 안들어옴
+         self.film_thickness = film_thickness
+@@ -18,11 +22,37 @@
+         self.fine_roughness = fine_roughness
+         self.coarse_roughness = coarse_roughness
+         self.r_i = r_i
++
++        # n_m은 '입자 사이 matrix index'입니다. 기존 코드에서는 이 값을
++        # sample 외부 medium index로도 사용했는데, PNAS/structcol에서는
++        # n_matrix와 n_medium을 구분합니다. Backward compatibility를 위해
++        # n_medium이 주어지지 않으면 n_m을 그대로 사용합니다.
+         self.n_m = n_m
++        self.n_matrix = n_m
++        self.n_medium = n_m if n_medium is None else n_medium
++
+         self.k_p = k_p
+         self.pdi = pdi
++        self.polydispersity = polydispersity
+         self.detect_angle = detect_angle
+ 
++        # structure_model='auto': monodisperse run에서는 Percus--Yevick glass
++        # factor를, polydisperse run에서는 Ginoza-Yasutomi measurable S_M(q)를
++        # 사용합니다. 기존 코드는 use_polydispersity=False에서도 항상
++        # Ginoza S_M(q)를 써서 Manoharan monodisperse PY 기준과 어긋났습니다.
++        self.structure_model = structure_model
++
++        # bulk form factor는 PNAS처럼 effective medium에서 계산하는 것이 기본.
++        # fine roughness의 첫 step은 원 structcol 구현처럼 matrix medium에서
++        # Mie-only scattering length를 계산하는 것이 기본입니다.
++        self.bulk_form_medium = bulk_form_medium
++        self.surface_form_medium = surface_form_medium
++        if surface_phase_mode not in ("bulk", "mie"):
++            raise ValueError("surface_phase_mode must be 'bulk' or 'mie'.")
++        self.surface_phase_mode = surface_phase_mode
++        if random_seed is not None:
++            np.random.seed(random_seed)
++
+ 
+     # ==========================================
+     # [그룹 1] 광학 상수 및 매질 특성 계산 메서드
+@@ -45,7 +75,7 @@
+         # "Designing angle-independent structural colors using Monte Carlo simulations of multiple scattering,"
+         # Proc. Natl. Acad. Sci. U.S.A. 118(4), e2015551118 (2021). DOI: 10.1073/pnas.2015551118
+         n_p_complex = self.get_n_p_real_sellmeier(wavelength) + 1j * self.k_p
+-        n_m_complex = self.n_m + 1j * 0.0
++        n_m_complex = self.n_matrix + 1j * 0.0
+         
+         phi_p = self.phi
+         phi_m = 1 - self.phi
+@@ -221,7 +251,7 @@
+         mx = m * x
+ 
+         x_mag = np.abs(x)
+-        n_stop = int(np.round(x_mag + 4.0 * x_mag ** (1.0 / 3.0) + 2.0))
++        n_stop = int(np.ceil(x_mag + 4.0 * x_mag ** (1.0 / 3.0) + 2.0))
+         n_stop = max(n_stop, 1)
+         n = np.arange(1, n_stop + 1, dtype=int)
+ 
+@@ -390,8 +420,29 @@
+ 
+         return diff_csca_avg, csca_avg
+     
+-    def _get_l_scat(self, csca_sample):
+-        rho = (self.phi * 3.0) / (4.0* np.pi * self.r_i**3)
++    def _get_number_density(self, radius_samples=None, size_pdf=None):
++        """Number density of scatterers in 1/(length unit)^3.
++
++        For a polydisperse distribution, the correct normalization is
++        rho = phi / <4*pi*r^3/3>, not phi / (4*pi*<r>^3/3).
++        The difference is small for pdi~0.03 but becomes visible for wider
++        distributions.
++        """
++        if radius_samples is None or size_pdf is None:
++            mean_r3 = self.r_i**3
++        else:
++            radius_samples = np.asarray(radius_samples, dtype=float)
++            size_pdf = np.asarray(size_pdf, dtype=float)
++            norm = np.trapezoid(size_pdf, radius_samples)
++            if norm <= 0 or not np.isfinite(norm):
++                raise ValueError("Invalid size_pdf normalization in number density.")
++            pdf = size_pdf / norm
++            mean_r3 = np.trapezoid((radius_samples**3) * pdf, radius_samples)
++
++        return (self.phi * 3.0) / (4.0 * np.pi * mean_r3)
++
++    def _get_l_scat(self, csca_sample, radius_samples=None, size_pdf=None):
++        rho = self._get_number_density(radius_samples=radius_samples, size_pdf=size_pdf)
+         return 1.0 / (rho * csca_sample)
+         
+     # Calculate transport length
+@@ -399,7 +450,7 @@
+         g = np.trapezoid(np.cos(theta_array) * theta_pdf, theta_array)
+         return l_scat / (1.0 - g)
+     
+-    def _get_phase_func_ginoza(self, wavelength, theta_array, backend="internal", radius_samples=None, size_pdf=None):
++    def _get_phase_func_ginoza(self, wavelength, theta_array, backend="internal", radius_samples=None, size_pdf=None, structure_model=None, form_medium="effective"):
+         theta_array = np.asarray(theta_array, dtype=float)
+         if theta_array.ndim != 1:
+             raise ValueError("theta_array must be a 1D array.")
+@@ -411,6 +462,12 @@
+         # 1) Complex particle index and effective medium index
+         n_p_complex = self.get_n_p_real_sellmeier(wavelength) + 1j * self.k_p
+         n_eff_complex = self._get_n_eff_ps_matrix(wavelength)
++        if form_medium == "effective":
++            n_form_complex = n_eff_complex
++        elif form_medium == "matrix":
++            n_form_complex = complex(self.n_matrix, 0.0)
++        else:
++            raise ValueError("form_medium must be 'effective' or 'matrix'.")
+         
+         # form factor / single-particle diff cross section
+         use_poly = (radius_samples is not None) and (size_pdf is not None)
+@@ -420,7 +477,7 @@
+             diff_csca_mie, csca_mie = self._get_polydisperse_form_factor_absorbing(
+                 wavelength=wavelength,
+                 n_p_complex=n_p_complex,
+-                n_eff_complex=n_eff_complex,
++                n_eff_complex=n_form_complex,
+                 theta_array=theta_array,
+                 radius_samples=radius_samples,
+                 size_pdf=size_pdf,
+@@ -431,7 +488,7 @@
+             diff_csca_mie, csca_mie, _, _ = self._get_mie_absorbing(
+                 wavelength=wavelength,
+                 n_p_complex=n_p_complex,
+-                n_eff_complex=n_eff_complex,
++                n_eff_complex=n_form_complex,
+                 theta_array=theta_array,
+                 backend=backend,
+             )
+@@ -440,10 +497,28 @@
+         # Use the real part for q, consistent with the usual structural-color definition.
+         q = self.get_q(np.real(n_eff_complex), theta_array, wavelength)
+         
+-        # 4) Structure factor from Ginoza model
+-        S_q = self._get_structure_factor_ginoza(q)
++        # 4) Structure factor
++        # - monodisperse Manoharan/PRE/structcol 기준: Percus--Yevick hard-sphere S(q)
++        # - polydisperse 기준: Ginoza-Yasutomi measurable S_M(q)
++        if structure_model is None:
++            structure_model = self.structure_model
++        if structure_model == "auto":
++            structure_model = "ginoza" if use_poly else "percus_yevick"
++
++        if structure_model in (None, "none", "None"):
++            S_q = np.ones_like(theta_array, dtype=float)
++        elif structure_model in ("percus_yevick", "py", "glass"):
++            S_q = self._get_structure_factor_percus_yevick(q)
++        elif structure_model in ("ginoza", "polydisperse"):
++            S_q = self._get_structure_factor_ginoza(q)
++        else:
++            raise ValueError(
++                "structure_model must be one of 'auto', 'percus_yevick', "
++                "'ginoza', or None."
++            )
++
+         S_q = np.asarray(np.real_if_close(S_q), dtype=float)
+-        # Numerical safeguard: measurable structure factor should not be negative
++        # Numerical safeguard: structure factor should not be negative
+         S_q = np.clip(S_q, 0.0, None)
+ 
+         # 5) Sample differential scattering cross section
+@@ -473,6 +548,49 @@
+ 
+         return phase_function, csca_sample, diff_csca_sample
+     
++    def _get_structure_factor_percus_yevick(self, q):
++        """Monodisperse Percus--Yevick hard-sphere structure factor.
++
++        This is the same analytical glass structure factor used in the
++        Manoharan structural-color package for `structure_type='glass'`.
++        Input q has units 1/length; internally qd = q * d, where d=2r.
++        """
++        q = np.asarray(q, dtype=float)
++        qd = q * (2.0 * self.r_i)
++        qd_safe = np.where(np.abs(qd) < 1e-8, 1e-8, qd)
++        phi = float(self.phi)
++
++        if not (0.0 <= phi < 1.0):
++            raise ValueError("self.phi must be in [0, 1) for Percus-Yevick S(q).")
++
++        lambda1 = (1.0 + 2.0 * phi)**2 / (1.0 - phi)**4
++        lambda2 = -(1.0 + phi / 2.0)**2 / (1.0 - phi)**4
++
++        c = -24.0 * phi * (
++            lambda1 * (np.sin(qd_safe) - qd_safe * np.cos(qd_safe)) / qd_safe**3
++            - 6.0 * phi * lambda2
++            * (
++                qd_safe**2 * np.cos(qd_safe)
++                - 2.0 * qd_safe * np.sin(qd_safe)
++                - 2.0 * np.cos(qd_safe)
++                + 2.0
++            )
++            / qd_safe**4
++            - (phi * lambda1 / 2.0)
++            * (
++                qd_safe**4 * np.cos(qd_safe)
++                - 4.0 * qd_safe**3 * np.sin(qd_safe)
++                - 12.0 * qd_safe**2 * np.cos(qd_safe)
++                + 24.0 * qd_safe * np.sin(qd_safe)
++                + 24.0 * np.cos(qd_safe)
++                - 24.0
++            )
++            / qd_safe**6
++        )
++
++        S = 1.0 / (1.0 - c)
++        return np.clip(np.real_if_close(S), 0.0, None)
++
+     def _get_structure_factor_ginoza(self, q):
+         """
+         Monospecies polydisperse measurable structure factor S_M(q)
+@@ -962,7 +1080,7 @@
+         if trace:
+             records.append((x, y, z, W, "start"))
+             
+-        ux, uy, uz, reflected_at_entry = self._interface_enter(u[0], u[1], u[2], is_top=True, n_i=self.n_m, n_t=n_eff_real)
++        ux, uy, uz, reflected_at_entry = self._interface_enter(u[0], u[1], u[2], is_top=True, n_i=self.n_medium, n_t=n_eff_real)
+         
+         if reflected_at_entry:
+             if trace:
+@@ -994,7 +1112,12 @@
+                 is_first_step = False
+                 if np.random.rand() < self.fine_roughness:
+                     current_l_scat = l_scat_surf
+-                    current_cdf = cdf_surf
++                    # PNAS/structcol fine roughness changes ONLY the first-step
++                    # scattering length.  The following scattering direction should
++                    # still be drawn from the bulk form*structure phase function.
++                    # Use surface_phase_mode="mie" only to reproduce the old code
++                    # or to diagnose pure Mie surface-angle effects.
++                    current_cdf = cdf_surf if self.surface_phase_mode == "mie" else cdf_norm
+                     step_type = "surface_step"
+                 else:
+                     current_l_scat = l_scat_norm
+@@ -1064,7 +1187,7 @@
+                     "trace": records if trace else None,
+                 }
+                 
+-                ux_new, uy_new, uz_new, reflected_inside = self._interface_infilm(ux, uy, uz, is_top=is_top_hit, n_i=n_eff_real, n_t=self.n_m)
++                ux_new, uy_new, uz_new, reflected_inside = self._interface_infilm(ux, uy, uz, is_top=is_top_hit, n_i=n_eff_real, n_t=self.n_medium)
+                 
+                 if not reflected_inside:
+                     if is_top_hit:
+@@ -1179,7 +1302,9 @@
+         return R, T
+ 
+     def run_simulation(self, wvls, theta_array, N_photons,
+-                        save_filename=None, backend="internal", use_polydispersity=False, return_diagnostics=False):
++                        save_filename=None, backend="internal", use_polydispersity=False,
++                        structure_model=None, bulk_form_medium=None, surface_form_medium=None,
++                        return_diagnostics=False):
+         """
+         Run Monte Carlo simulation over wavelengths.
+         """
+@@ -1189,6 +1314,12 @@
+         diagnostics_all = []
+         
+         theta_array = np.asarray(theta_array, dtype=float)
++        if structure_model is None:
++            structure_model = self.structure_model
++        if bulk_form_medium is None:
++            bulk_form_medium = self.bulk_form_medium
++        if surface_form_medium is None:
++            surface_form_medium = self.surface_form_medium
+         
+         # Optional polydisperse radius grid
+         if use_polydispersity:
+@@ -1203,23 +1334,34 @@
+             mu_a = self._get_mu_a(wavelength, n_eff_complex)
+             
+             # 2. Phase function 및 l_scat 도출
++            # bulk_form_medium='effective' is the PNAS default. A 'matrix' option
++            # is kept for diagnostics against older/single-scattering conventions.
++            if bulk_form_medium not in ("effective", "matrix"):
++                raise ValueError("bulk_form_medium must be 'effective' or 'matrix'.")
++            if surface_form_medium not in ("effective", "matrix"):
++                raise ValueError("surface_form_medium must be 'effective' or 'matrix'.")
++
+             phase_norm, csca_sample, diff_sample = self._get_phase_func_ginoza(
+                 wavelength=wavelength,
+                 theta_array=theta_array,
+                 backend=backend,
+                 radius_samples=radius_samples,
+                 size_pdf=size_pdf,
++                structure_model=structure_model,
++                form_medium=bulk_form_medium,
+             )
+             cdf_norm, theta_pdf_norm = self._cdf_phase(phase_norm, theta_array)
+-            l_scat_norm = self._get_l_scat(csca_sample)
++            l_scat_norm = self._get_l_scat(csca_sample, radius_samples=radius_samples, size_pdf=size_pdf)
+             
+             n_p_complex = self.get_n_p_real_sellmeier(wavelength) + 1j * self.k_p
+ 
++            n_surface_form = n_eff_complex if surface_form_medium == "effective" else complex(self.n_matrix, 0.0)
++
+             if use_polydispersity:
+                 diff_mie, csca_mie = self._get_polydisperse_form_factor_absorbing(
+                     wavelength=wavelength,
+                     n_p_complex=n_p_complex,
+-                    n_eff_complex=n_eff_complex,
++                    n_eff_complex=n_surface_form,
+                     theta_array=theta_array,
+                     radius_samples=radius_samples,
+                     size_pdf=size_pdf,
+@@ -1229,7 +1371,7 @@
+                 diff_mie, csca_mie, _, _ = self._get_mie_absorbing(
+                     wavelength=wavelength,
+                     n_p_complex=n_p_complex,
+-                    n_eff_complex=n_eff_complex,
++                    n_eff_complex=n_surface_form,
+                     theta_array=theta_array,
+                     backend=backend,
+                 )
+@@ -1242,7 +1384,7 @@
+             phase_surf = phase_surf / phase_surf_norm
+ 
+             cdf_surf, theta_pdf_surf = self._cdf_phase(phase_surf, theta_array)
+-            l_scat_surf = self._get_l_scat(csca_mie)
++            l_scat_surf = self._get_l_scat(csca_mie, radius_samples=radius_samples, size_pdf=size_pdf)
+             
+             if return_diagnostics:
+                 R, T, A, diag = self._run_single_wavelength(
+@@ -1306,6 +1448,76 @@
+         return reflectance, transmittance, absorbance
+                 
+ 
++    def diagnose_scattering_kernel(self, wavelengths, theta_array, backend="internal",
++                                   use_polydispersity=False):
++        """Return fast, non-Monte-Carlo diagnostics for the scattering kernel.
++
++        This helper is intended for debugging Manoharan/PNAS reproduction:
++        it reports Mie-only and form*structure cross sections for both the
++        monodisperse Percus--Yevick and Ginoza-Yasutomi structure factors.
++        """
++        theta_array = np.asarray(theta_array, dtype=float)
++        rows = []
++
++        if use_polydispersity:
++            radius_samples, size_pdf = self._get_schulz_distribution()
++        else:
++            radius_samples, size_pdf = None, None
++
++        for wavelength in np.atleast_1d(wavelengths):
++            wavelength = float(wavelength)
++            n_eff_complex = self._get_n_eff_ps_matrix(wavelength)
++            n_p_complex = self.get_n_p_real_sellmeier(wavelength) + 1j * self.k_p
++            q = self.get_q(np.real(n_eff_complex), theta_array, wavelength)
++
++            diff_eff, csca_eff, _, _ = self._get_mie_absorbing(
++                wavelength, n_p_complex, n_eff_complex, theta_array, backend=backend
++            )
++            diff_mat, csca_mat, _, _ = self._get_mie_absorbing(
++                wavelength, n_p_complex, complex(self.n_matrix, 0.0), theta_array, backend=backend
++            )
++
++            out = {
++                "wavelength": wavelength,
++                "n_eff_real": float(np.real(n_eff_complex)),
++                "n_eff_imag": float(np.imag(n_eff_complex)),
++                "csca_mie_effective": float(csca_eff),
++                "csca_mie_matrix": float(csca_mat),
++            }
++
++            for name, S in [
++                ("py", self._get_structure_factor_percus_yevick(q)),
++                ("ginoza", self._get_structure_factor_ginoza(q)),
++            ]:
++                diff_sample = diff_eff * S
++                csca_sample = 2.0 * np.pi * np.trapezoid(
++                    diff_sample * np.sin(theta_array), theta_array
++                )
++                phase = diff_sample / csca_sample
++                cdf, theta_pdf = self._cdf_phase(phase, theta_array)
++                l_scat = self._get_l_scat(csca_sample, radius_samples, size_pdf)
++                l_star = self._get_l_star(l_scat, theta_pdf, theta_array)
++                out[f"csca_sample_{name}"] = float(csca_sample)
++                out[f"weighted_S_{name}"] = float(csca_sample / csca_eff)
++                out[f"l_scat_{name}"] = float(l_scat)
++                out[f"l_star_{name}"] = float(l_star)
++                out[f"Smax_{name}"] = float(np.max(S))
++
++            rows.append(out)
++
++        return rows
++
++    # Backward-friendly alias for the same diagnostic helper.
++    def kernel_diagnostics(self, wavelengths, theta_array, backend="internal",
++                           use_polydispersity=False):
++        return self.diagnose_scattering_kernel(
++            wavelengths=wavelengths,
++            theta_array=theta_array,
++            backend=backend,
++            use_polydispersity=use_polydispersity,
++        )
++
++
+ if __name__=="__main__":
+     sim = PhotonicGlassMCSimulator(
+         film_thickness = 77.0, #um
+
