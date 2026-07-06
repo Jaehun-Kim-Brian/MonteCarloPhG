@@ -70,7 +70,7 @@ class PhotonicGlassMCSimulator2:
         # Acta Physica Polonica A 116(4), 585-587 (2009). DOI: 10.12693/APhysPolA.116.585
         return np.sqrt(1 + (1.4435 * wavelength**2) / (wavelength**2 - 0.020216))
 
-    def _get_n_eff_ps_matrix(self, wavelength):
+    def _get_n_eff_ps_matrix_old(self, wavelength):
         # Ref: SI Eq. (8), Hwang, Stephenson, Barkley, Brandt, Xiao, Aizenberg, and Manoharan,
         # "Designing angle-independent structural colors using Monte Carlo simulations of multiple scattering,"
         # Proc. Natl. Acad. Sci. U.S.A. 118(4), e2015551118 (2021). DOI: 10.1073/pnas.2015551118
@@ -113,28 +113,75 @@ class PhotonicGlassMCSimulator2:
             raise ValueError(f"Computed n_eff has negative imaginary part: {n_eff}")
         
         return n_eff
+    
+    def _get_n_eff_ps_matrix(self, wavelength):
+        # Ref: SI Eq. (8), Hwang, Stephenson, Barkley, Brandt, Xiao, Aizenberg, and Manoharan,
+        # "Designing angle-independent structural colors using Monte Carlo simulations of multiple scattering,"
+        # Proc. Natl. Acad. Sci. U.S.A. 118(4), e2015551118 (2021). DOI: 10.1073/pnas.2015551118
+        n_p_complex = self.get_n_p_real_sellmeier(wavelength) + 1j * self.k_p
+        n_m_complex = self.n_matrix + 1j * 0.0
+        
+        phi_p = self.phi
+        
+        if not (0.0 <= phi_p <= 1.0):
+            raise ValueError("self.phi must be between 0 and 1.")
+        
+        ni = n_p_complex
+        nm = n_m_complex
+        phi = phi_p
+        neff =  nm * np.sqrt((2*nm**2 + ni**2 + 2*phi*((ni**2)-(nm**2))) /
+                         (2*nm**2 + ni**2 - phi*((ni**2)-(nm**2))))
+        
+        return neff
+        
+        
+    
+    def _pis_and_taus(self, nstop, theta_array):
+        """
+        Return:
+            pis[:, i]  = pi_{i+1}(theta)
+            taus[:, i] = tau_{i+1}(theta)
 
+        Shape:
+            pis.shape  = (len(theta_array), nstop)
+            taus.shape = (len(theta_array), nstop)
+        """
+        theta_array = np.atleast_1d(theta_array)
+        mu = np.cos(theta_array)
 
-    def _riccati_bessel(self, n, z): 
+        pis = np.zeros((len(theta_array), nstop), dtype=float)
+        taus = np.zeros((len(theta_array), nstop), dtype=float)
+
+        pi_nm2 = np.zeros_like(mu)  # pi_0
+        pi_nm1 = np.ones_like(mu)   # pi_1
+
+        for ni in range(1, nstop + 1):
+            idx = ni - 1
+
+            if ni == 1:
+                pi_n = pi_nm1
+                pi_n_minus_1 = pi_nm2
+            else:
+                pi_n = (
+                    ((2 * ni - 1) / (ni - 1)) * mu * pi_nm1
+                    - (ni / (ni - 1)) * pi_nm2
+                )
+                pi_n_minus_1 = pi_nm1
+
+            tau_n = ni * mu * pi_n - (ni + 1) * pi_n_minus_1
+
+            pis[:, idx] = pi_n
+            taus[:, idx] = tau_n
+
+            if ni >= 2:
+                pi_nm2, pi_nm1 = pi_nm1, pi_n
+
+        return pis, taus
+
+    def _get_mie_absorbing(self, wavelength, n_p_complex, n_eff_complex, theta_array, radius=None, backend="internal", return_components=False):    
         # Ref: SI Eq. (12)-(13), Hwang, Stephenson, Barkley, Brandt, Xiao, Aizenberg, and Manoharan,
         # "Designing angle-independent structural colors using Monte Carlo simulations of multiple scattering,"
         # Proc. Natl. Acad. Sci. U.S.A. 118(4), e2015551118 (2021). DOI: 10.1073/pnas.2015551118
-        jn = spherical_jn(n, z)
-        jn_1 = spherical_jn(n-1, z)
-        yn = spherical_yn(n, z)
-        yn_1 = spherical_yn(n-1, z)
-        
-        hn = jn + 1j * yn
-        hn_1 = jn_1 + 1j * yn_1
-        
-        psi_n = z * jn
-        psi_n_prime = z * jn_1 - n * jn
-        
-        xi_n = z * hn
-        xi_n_prime = z * hn_1 - n *hn
-        return psi_n, psi_n_prime, xi_n, xi_n_prime 
-
-    def _get_mie_absorbing(self, wavelength, n_p_complex, n_eff_complex, theta_array, radius=None, backend="internal", return_components=False):    
         """
         Returns
         -------
@@ -251,7 +298,7 @@ class PhotonicGlassMCSimulator2:
         mx = m * x
 
         x_mag = np.abs(x)
-        n_stop = int(np.ceil(x_mag + 4.0 * x_mag ** (1.0 / 3.0) + 2.0))
+        n_stop = int(np.round(np.abs(x_mag + 11 * x_mag**(1/3) + 1)))
         n_stop = max(n_stop, 1)
         n = np.arange(1, n_stop + 1, dtype=int)
 
@@ -263,7 +310,7 @@ class PhotonicGlassMCSimulator2:
 
         def _Dn(order, z):
             jn = spherical_jn(order, z)
-            jn_p = spherical_jn(order, z, derivative=True)
+            jn_p = spherical_jn(order, z, derivative=True) # 미분형
             psi = z * jn
             psi_p = jn + z * jn_p
             tiny = 1e-300
@@ -291,35 +338,18 @@ class PhotonicGlassMCSimulator2:
         a_n = (A_n * psi_n_x - psi_nm1_x) / denom_a
         b_n = (B_n * psi_n_x - psi_nm1_x) / denom_b
 
-        mu = np.cos(theta_array)
+        pis, taus = self._pis_and_taus(n_stop, theta_array)
         S1 = np.zeros_like(theta_array, dtype=complex)
         S2 = np.zeros_like(theta_array, dtype=complex)
 
-        pi_0 = np.zeros_like(theta_array, dtype=float)
-        pi_1 = np.ones_like(theta_array, dtype=float)
-
-        pi_nm2 = pi_0
-        pi_nm1 = pi_1
-
-        for idx, ni in enumerate(n):
-            if ni == 1:
-                pi_n = pi_1
-                pi_n_minus_1 = pi_0
-            else:
-                pi_n = (
-                    ((2 * ni - 1) / (ni - 1)) * mu * pi_nm1
-                    - (ni / (ni - 1)) * pi_nm2
-                )
-                pi_n_minus_1 = pi_nm1
-
-            tau_n = ni * mu * pi_n - (ni + 1) * pi_n_minus_1
+        for idx, ni in enumerate(range(1, n_stop+1)):
             prefac = (2 * ni + 1) / (ni * (ni + 1))
+
+            pi_n = pis[:, idx]
+            tau_n = taus[:, idx ]
 
             S1 += prefac * (a_n[idx] * pi_n + b_n[idx] * tau_n)
             S2 += prefac * (a_n[idx] * tau_n + b_n[idx] * pi_n)
-
-            if ni >= 2:
-                pi_nm2, pi_nm1 = pi_nm1, pi_n
 
         # absorbing-medium radial factor at r = a
         # SI description: exp(-2 k'' r) / [ (k' r)^2 + (k'' r)^2 ]
@@ -898,24 +928,94 @@ class PhotonicGlassMCSimulator2:
         R_f = 0.5 * (r_s**2 + r_p**2)
         return R_f
     
+    def _prepare_coarse_roughness_distribution(self, n_grid=500):
+        r = float(self.coarse_roughness)
+
+        if r <= 0.0:
+            self._theta_a_grid = np.array([0.0])
+            self._theta_a_prob = np.array([1.0])
+            return
+
+        eps = 1e-8
+        theta_grid = np.linspace(0.0, np.pi / 2.0 - eps, n_grid)
+
+        sin_t = np.sin(theta_grid)
+        cos_t = np.cos(theta_grid)
+        tan_t = np.tan(theta_grid)
+
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            log_prob = (
+                np.log(np.maximum(sin_t, 1e-300))
+                - 2.0 * np.log(r)
+                - 3.0 * np.log(np.maximum(cos_t, 1e-300))
+                - (tan_t ** 2) / (2.0 * r ** 2)
+            )
+
+        log_prob[~np.isfinite(log_prob)] = -np.inf
+        log_prob -= np.max(log_prob)
+
+        prob = np.exp(log_prob)
+        prob[~np.isfinite(prob)] = 0.0
+        prob = np.clip(prob, 0.0, None)
+
+        prob_sum = np.sum(prob)
+        if prob_sum <= 0.0 or not np.isfinite(prob_sum):
+            theta_grid = np.array([0.0])
+            prob = np.array([1.0])
+        else:
+            prob = prob / prob_sum
+
+        self._theta_a_grid = theta_grid
+        self._theta_a_prob = prob
+    
+    def _sample_theta_a_from_coarse_roughness(self, n_samples=1, n_grid=500):
+        if not hasattr(self, "_theta_a_grid") or not hasattr(self, "_theta_a_prob"):
+            self._prepare_coarse_roughness_distribution(n_grid=n_grid)
+
+        return np.random.choice(
+            self._theta_a_grid,
+            size=n_samples,
+            p=self._theta_a_prob
+        )
+    
     def _get_norm_vec(self, upward=True):
-        c = float(self.coarse_roughness)
-        
-        if c < 0.0:
+        """
+        Sample a local surface normal vector using the same theta_a distribution
+        as the referenced coarse roughness source code, with an isotropic azimuth.
+
+        coarse_roughness controls the rms surface slope parameter r.
+        """
+        r = float(self.coarse_roughness)
+
+        if r < 0.0:
             raise ValueError("coarse_roughness must be non-negative.")
-        if c == 0.0:
-            n = np.array([0.0, 0.0, 1.0])
-        else:    
-            slope_x = np.random.normal(0.0, c/np.sqrt(2.0))
-            slope_y = np.random.normal(0.0, c/np.sqrt(2.0))
-            
+
+        if r == 0.0:
+            n = np.array([0.0, 0.0, 1.0], dtype=float)
+        else:
+            theta_a = self._sample_theta_a_from_coarse_roughness(
+                n_samples=1,
+                n_grid=500,
+            )[0]
+
+            # Random azimuthal direction of the surface tilt
+            phi_a = np.random.uniform(0.0, 2.0 * np.pi)
+
+            # slope magnitude s = tan(theta_a)
+            slope = np.tan(theta_a)
+
+            slope_x = slope * np.cos(phi_a)
+            slope_y = slope * np.sin(phi_a)
+
+            # Local surface z = slope_x x + slope_y y has normal (-slope_x, -slope_y, 1)
             n = np.array([-slope_x, -slope_y, 1.0], dtype=float)
             n /= np.linalg.norm(n)
-            
-        
+
         if not upward:
             n = -n
+
         return n
+    
      
     def _interface_enter(self, u_x, u_y, u_z, is_top, n_i, n_t, max_trial=5):
         u = np.array([u_x, u_y, u_z], dtype=float)
@@ -1172,6 +1272,7 @@ class PhotonicGlassMCSimulator2:
                 
                 W *= np.exp(-mu_a * path_to_boundary)
                 remaining -= path_to_boundary
+                total_path += path_to_boundary
                 
                 if trace:
                     records.append((x, y, z, W, "hit_top" if is_top_hit else "hit_bottom"))
