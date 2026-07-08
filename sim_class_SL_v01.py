@@ -70,7 +70,7 @@ class PhotonicGlassMCSimulator2:
         # Acta Physica Polonica A 116(4), 585-587 (2009). DOI: 10.12693/APhysPolA.116.585
         return np.sqrt(1 + (1.4435 * wavelength**2) / (wavelength**2 - 0.020216))
 
-    def _get_n_eff_ps_matrix_old(self, wavelength):
+    def _get_n_eff_ps_matrix(self, wavelength):
         # Ref: SI Eq. (8), Hwang, Stephenson, Barkley, Brandt, Xiao, Aizenberg, and Manoharan,
         # "Designing angle-independent structural colors using Monte Carlo simulations of multiple scattering,"
         # Proc. Natl. Acad. Sci. U.S.A. 118(4), e2015551118 (2021). DOI: 10.1073/pnas.2015551118
@@ -114,7 +114,7 @@ class PhotonicGlassMCSimulator2:
         
         return n_eff
     
-    def _get_n_eff_ps_matrix(self, wavelength):
+    def _get_n_eff_ps_matrix_mg(self, wavelength):
         # Ref: SI Eq. (8), Hwang, Stephenson, Barkley, Brandt, Xiao, Aizenberg, and Manoharan,
         # "Designing angle-independent structural colors using Monte Carlo simulations of multiple scattering,"
         # Proc. Natl. Acad. Sci. U.S.A. 118(4), e2015551118 (2021). DOI: 10.1073/pnas.2015551118
@@ -478,7 +478,7 @@ class PhotonicGlassMCSimulator2:
     # Calculate transport length
     def _get_l_star(self, l_scat, theta_pdf, theta_array):
         g = np.trapezoid(np.cos(theta_array) * theta_pdf, theta_array)
-        return l_scat / (1.0 - g)
+        return l_scat / (1.0 - g) , g
     
     def _get_phase_func_ginoza(self, wavelength, theta_array, backend="internal", radius_samples=None, size_pdf=None, structure_model=None, form_medium="effective"):
         theta_array = np.asarray(theta_array, dtype=float)
@@ -1597,7 +1597,7 @@ class PhotonicGlassMCSimulator2:
                 phase = diff_sample / csca_sample
                 cdf, theta_pdf = self._cdf_phase(phase, theta_array)
                 l_scat = self._get_l_scat(csca_sample, radius_samples, size_pdf)
-                l_star = self._get_l_star(l_scat, theta_pdf, theta_array)
+                l_star, _ = self._get_l_star(l_scat, theta_pdf, theta_array)
                 out[f"csca_sample_{name}"] = float(csca_sample)
                 out[f"weighted_S_{name}"] = float(csca_sample / csca_eff)
                 out[f"l_scat_{name}"] = float(l_scat)
