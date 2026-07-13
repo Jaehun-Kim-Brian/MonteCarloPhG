@@ -178,7 +178,7 @@ class PhotonicGlassMCSimulator2:
 
         return pis, taus
 
-    def _get_mie_absorbing(self, wavelength, n_p_complex, n_eff_complex, theta_array, radius=None, backend="internal", return_components=False):    
+    def _get_mie_absorbing(self, wavelength, n_p_complex, n_host_complex, theta_array, radius=None, backend="internal", return_components=False):    
         # Ref: SI Eq. (12)-(13), Hwang, Stephenson, Barkley, Brandt, Xiao, Aizenberg, and Manoharan,
         # "Designing angle-independent structural colors using Monte Carlo simulations of multiple scattering,"
         # Proc. Natl. Acad. Sci. U.S.A. 118(4), e2015551118 (2021). DOI: 10.1073/pnas.2015551118
@@ -227,11 +227,11 @@ class PhotonicGlassMCSimulator2:
                 ) from exc
 
             # particle-medium index ratio and size parameter
-            m = index_ratio(n_p_complex, n_eff_complex)
-            x = size_parameter(wavelength, n_eff_complex, a)
+            m = index_ratio(n_p_complex, n_host_complex)
+            x = size_parameter(wavelength, n_host_complex, a)
 
             # complex wavevector in the effective medium
-            k = 2.0 * np.pi * n_eff_complex / wavelength
+            k = 2.0 * np.pi * n_host_complex / wavelength
 
             # pymie returns parallel/perpendicular differential intensities
             # in the absorbing medium, evaluated at k*distance
@@ -292,9 +292,9 @@ class PhotonicGlassMCSimulator2:
         # ----------------------------------
         # BACKEND 2: internal
         # ----------------------------------
-        k = 2.0 * np.pi * n_eff_complex / wavelength
+        k = 2.0 * np.pi * n_host_complex / wavelength
         x = k * a
-        m = n_p_complex / n_eff_complex
+        m = n_p_complex / n_host_complex
         mx = m * x
 
         x_mag = np.abs(x)
@@ -395,7 +395,7 @@ class PhotonicGlassMCSimulator2:
             return diff_csca, csca_total, S1, S2, a_n, b_n
         return diff_csca, csca_total, S1, S2
         
-    def _get_polydisperse_form_factor_absorbing(self, wavelength, n_p_complex, n_eff_complex, theta_array, radius_samples, size_pdf, backend="internal"):
+    def _get_polydisperse_form_factor_absorbing(self, wavelength, n_p_complex, n_host_complex, theta_array, radius_samples, size_pdf, backend="internal"):
         """
         Size-averaged absorbing-medium form factor:
         F(theta) = ∫ p(r) dCsca/dOmega(theta; r) dr
@@ -426,7 +426,7 @@ class PhotonicGlassMCSimulator2:
             diff_r, csca_r, _, _ = self._get_mie_absorbing(
                 wavelength=wavelength,
                 n_p_complex=n_p_complex,
-                n_eff_complex=n_eff_complex,
+                n_host_complex=n_host_complex,
                 theta_array=theta_array,
                 radius=r,
                 backend=backend,
@@ -507,7 +507,7 @@ class PhotonicGlassMCSimulator2:
             diff_csca_mie, csca_mie = self._get_polydisperse_form_factor_absorbing(
                 wavelength=wavelength,
                 n_p_complex=n_p_complex,
-                n_eff_complex=n_form_complex,
+                n_host_complex=n_form_complex,
                 theta_array=theta_array,
                 radius_samples=radius_samples,
                 size_pdf=size_pdf,
@@ -518,7 +518,7 @@ class PhotonicGlassMCSimulator2:
             diff_csca_mie, csca_mie, _, _ = self._get_mie_absorbing(
                 wavelength=wavelength,
                 n_p_complex=n_p_complex,
-                n_eff_complex=n_form_complex,
+                n_host_complex=n_form_complex,
                 theta_array=theta_array,
                 backend=backend,
             )
@@ -1353,7 +1353,107 @@ class PhotonicGlassMCSimulator2:
             "n_scat": n_scat,
             "path": total_path,
             "trace": records if trace else None,
-        }        
+        }       
+    
+    def snell_refraction(self, inc_theta, n_before, n_after):
+        snell = n_before / n_after * np.sin(inc_theta)
+        snell[abs(snell) > 1] = np.nan # 정상적인 각도는 정상 굴절각 전달 else, nan 전달
+        return np.arcsin(snell)
+    
+    def initialize(self, n_sample_complex, N_photons, N_events, incident_angle, coarse_roughness=0.9):
+        position = np.zeros((3, N_events+1, N_photons))
+        direction = np.zeros((3, N_events, N_photons))
+        weight = np.ones((N_events, N_photons))
+        
+        position[0,0,:] = 0 # initial X position of photons
+        position[1,0,:] = 0 # initial Y position of photons
+        
+        # Incindent from air to film
+        inc_theta = np.radians(incident_angle)
+        sintheta = np.sin(inc_theta)
+        costheta = np.cos(inc_theta)
+        
+        inc_phi = 2* np.pi * np.random.rand(N_photons) # (20000, )
+        sinphi = np.sin(inc_phi)
+        cosphi = np.cos(inc_phi)
+
+        kx0 = sintheta * cosphi
+        ky0 = sintheta * sinphi
+        kz0 = costheta            
+        direction[0,0,:] = kx0
+        direction[1,0,:] = ky0
+        direction[2,0,:] = kz0
+        
+        theta_a = self._sample_theta_a_from_coarse_roughness(n_samples=N_photons)
+        sintheta_a = np.sin(theta_a)
+        costheta_a = np.cos(theta_a)
+        # Coarse Roughness에 의해 기울어진 새로운 좌표축의 법선을 z'축으로 삼을 때 기준의 입사 방향
+        kx0_rot = costheta_a * kx0 - sintheta_a * kz0
+        ky0_rot = ky0
+        kz0_rot = sintheta_a * kx0 + costheta_a * kz0
+        # z'축을 기준으로 현재 방향([kx0, ky0, kz0])은 어떠한 입사각을 갖는지
+        theta_rot = np.arccos(kz0_rot/ np.sqrt(kx0_rot**2 + ky0_rot**2 + kz0_rot**2))
+        phi_rot = np.arccos(kx0_rot/ np.sqrt(kx0_rot**2 + ky0_rot**2 + kz0_rot**2))
+        # Refraction angle via Snell's Law
+        n_eff_real = np.real(n_sample_complex)
+        theta_refr = self.snell_refraction(theta_rot, self.n_medium, np.abs(n_eff_real))
+        # z'축을 기준으로 굴절된 방향 계산 (theta_refr, phi_rot 이용)
+        kx0_rot_refr = np.sin(theta_refr) * np.cos(phi_rot)
+        ky0_rot_refr = np.sin(theta_refr) * np.sin(phi_rot)
+        kz0_rot_refr = np.cos(theta_refr)
+        
+        # Coarse Roughness에 의한 계산을 마쳤으므로, MC에서 사용 가능하도록 (_rot_refr)를 global 좌표계로 다시 변환하기
+        # (global) coordinates by doing an axis rotation around y by 2pi-theta_a 
+        kx0_refr = (np.cos(2*np.pi-theta_a) * kx0_rot_refr - np.sin(2*np.pi-theta_a) * kz0_rot_refr)
+        ky0_refr = ky0_rot_refr
+        kz0_refr = (np.sin(2*np.pi-theta_a) * kx0_rot_refr + np.cos(2*np.pi-theta_a) * kz0_rot_refr)
+        
+        # interface를 뚫고 들어간 photon들의 global direction을 초기 direction으로 저장(기존에는 interface 통과 이전의 incident angle dependant value로 저장되어 있었음)
+        direction[0,0,:] = kx0_refr
+        direction[1,0,:] = ky0_refr
+        direction[2,0,:] = kz0_refr
+        
+        # z'축을 기준으로 입사 후 반사된 photon의 방향을 global direction으로 축변환 해줌
+        # (global) coordinates by doing an axis rotation around y by 2pi-theta_a 
+        kx0_rot_refl = kx0_rot
+        ky0_rot_refl = ky0_rot
+        kz0_rot_refl = -kz0_rot
+        kx0_refl = (np.cos(2*np.pi-theta_a) * kx0_rot_refl - np.sin(2*np.pi-theta_a) * kz0_rot_refl)
+        ky0_refl = ky0_rot_refl
+        kz0_refl = (np.sin(2*np.pi-theta_a) * kx0_rot_refl + np.cos(2*np.pi-theta_a) * kz0_rot_refl)
+        
+        # N_photons, N_events에 대한 위치, 방향, 가중치를 저장 / coarse roughness에 의한 z'축 법선에 대한 입사각도, global 반사각을 저장
+        return [position, direction, weight, kz0_rot, kz0_refl]
+       
+    def _run_single_wavelength_new(self, theta_array, n_eff_complex,
+                               mu_a, l_scat_norm, cdf_norm, l_scat_surf, cdf_surf, n_eff_real,
+                               incident_angle=8.0, N_photons=20000, N_events=300, return_diagnostics=False):
+        
+        # init = [position, direction, weight, kz0_rot, kz0_refl]
+        init = self.initialize(n_sample_complex=n_eff_complex,
+                        N_photons=N_photons, N_events=N_events, incident_angle=incident_angle)
+        
+        position, direction, weight, kz0_rot, kz0_refl = init
+        
+        
+        
+
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+            
+            
+
+    
+        
+         
     def _run_single_wavelength(self, N_photons, theta_array, 
                                mu_a, l_scat_norm, cdf_norm, l_scat_surf, cdf_surf, n_eff_real,
                                return_diagnostics=False):
@@ -1462,7 +1562,7 @@ class PhotonicGlassMCSimulator2:
                 diff_mie, csca_mie = self._get_polydisperse_form_factor_absorbing(
                     wavelength=wavelength,
                     n_p_complex=n_p_complex,
-                    n_eff_complex=n_surface_form,
+                    n_host_complex=n_surface_form,
                     theta_array=theta_array,
                     radius_samples=radius_samples,
                     size_pdf=size_pdf,
@@ -1472,7 +1572,7 @@ class PhotonicGlassMCSimulator2:
                 diff_mie, csca_mie, _, _ = self._get_mie_absorbing(
                     wavelength=wavelength,
                     n_p_complex=n_p_complex,
-                    n_eff_complex=n_surface_form,
+                    n_host_complex=n_surface_form,
                     theta_array=theta_array,
                     backend=backend,
                 )
@@ -1489,6 +1589,7 @@ class PhotonicGlassMCSimulator2:
             
             if return_diagnostics:
                 R, T, A, diag = self._run_single_wavelength(
+                    n_eff_comlex=n_eff_complex,
                     N_photons=N_photons,
                     theta_array=theta_array,
                     mu_a=mu_a,

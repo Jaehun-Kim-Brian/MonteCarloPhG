@@ -88,3 +88,111 @@ run_simulation()
            │    └─ _calculate_fresnel()
            └─ _scatter_direction()
 ```
+라면
+
+ \[
+=
+    C_1^{①}
+    \left[
+    \left(
+    \mathbf{V}_{[h_1 -1,h_2]}
+    \exp\left(i\mathbf{k}\cdot\left(-\frac{2}{3}\mathbf{a}_1+\frac{1}{3}\mathbf{a}_2\right)\right)
+    -
+    \mathbf{U}_{[h_1,h_2]}
+    \right)
+    \cdot \hat{\mathbf{n}}_1
+    \right]
+    \hat{\mathbf{n}}_1
+    \times
+    \exp\left(i\mathbf{k}\cdot (\mathbf{x}_m)_{[h_1,h_2]}\right)\exp(i\omega t)
+\]
+라면
+
+ \[
+=
+    C_2^{①}
+    \left[
+    \left(
+    \mathbf{V}_{[h_1,h_2 -1]}
+    \exp\left(i\mathbf{k}\cdot\left(\frac{1}{3}\mathbf{a}_1-\frac{2}{3}\mathbf{a}_2\right)\right)
+    -
+    \mathbf{U}_{[h_1,h_2]}
+    \right)
+    \cdot \hat{\mathbf{n}}_2
+    \right]
+    \hat{\mathbf{n}}_2
+    \times
+    \exp\left(i\mathbf{k}\cdot (\mathbf{x}_m)_{[h_1,h_2]}\right)\exp(i\omega t)
+\]
+라면
+
+ \[
+=
+    C_3^{①}
+    \left[
+    \left(
+    \mathbf{V}_{[h_1,h_2]}
+    \exp\left(i\mathbf{k}\cdot\left(\frac{1}{3}\mathbf{a}_1+\frac{1}{3}\mathbf{a}_2\right)\right)
+    -
+    \mathbf{U}_{[h_1,h_2]}
+    \right)
+    \cdot \hat{\mathbf{n}}_3
+    \right]
+    \hat{\mathbf{n}}_3
+    \times
+    \exp\left(i\mathbf{k}\cdot (\mathbf{x}_m)_{[h_1,h_2]}\right)\exp(i\omega t)
+\]
+라면
+
+ \[
+=
+    C_1^{①}
+    \left[
+    \left(
+    \mathbf{U}_{[h_1 +1,h_2]}
+    \exp\left(i\mathbf{k}\cdot\left(\frac{2}{3}\mathbf{a}_1-\frac{1}{3}\mathbf{a}_2\right)\right)
+    -
+    \mathbf{V}_{[h_1,h_2]}
+    \right)
+    \cdot \hat{\mathbf{n}}_1
+    \right]
+    \hat{\mathbf{n}}_1
+    \times
+    \exp\left(i\mathbf{k}\cdot (\mathbf{x}_M)_{[h_1,h_2]}\right)\exp(i\omega t)
+\]
+라면
+
+ \[
+=
+    C_2^{①}
+    \left[
+    \left(
+    \mathbf{U}_{[h_1,h_2 +1]}
+    \exp\left(i\mathbf{k}\cdot\left(-\frac{1}{3}\mathbf{a}_1+\frac{2}{3}\mathbf{a}_2\right)\right)
+    -
+    \mathbf{V}_{[h_1,h_2]}
+    \right)
+    \cdot \hat{\mathbf{n}}_2
+    \right]
+    \hat{\mathbf{n}}_2
+    \times
+    \exp\left(i\mathbf{k}\cdot (\mathbf{x}_M)_{[h_1,h_2]}\right)\exp(i\omega t)
+\]
+라면
+
+ \[
+=
+    C_3^{①}
+    \left[
+    \left(
+    \mathbf{U}_{[h_1,h_2]}
+    \exp\left(i\mathbf{k}\cdot\left(\frac{1}{3}\mathbf{a}_1+\frac{1}{3}\mathbf{a}_2\right)\right)
+    -
+    \mathbf{V}_{[h_1,h_2]}
+    \right)
+    \cdot \hat{\mathbf{n}}_3
+    \right]
+    \hat{\mathbf{n}}_3
+    \times
+    \exp\left(i\mathbf{k}\cdot (\mathbf{x}_M)_{[h_1,h_2]}\right)\exp(i\omega t)
+\]
