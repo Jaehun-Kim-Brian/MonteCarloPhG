@@ -1,6 +1,7 @@
 # Diagnostic patch for PNAS/Manoharan reproduction: form/structure-factor corrections.
 import numpy as np
 import matplotlib.pyplot as plt
+import copy
 from tqdm import tqdm
 from scipy.stats import gamma
 from scipy.special import spherical_jn, spherical_yn
@@ -34,7 +35,7 @@ class PhotonicGlassMCSimulator2:
         self.k_p = k_p
         self.pdi = pdi
         self.polydispersity = polydispersity
-        self.detect_angle = detect_angle
+        self.detect_angle = np.radians(detect_angle)
 
         # structure_model='auto': monodisperse run에서는 Percus--Yevick glass
         # factor를, polydisperse run에서는 Ginoza-Yasutomi measurable S_M(q)를
@@ -882,7 +883,7 @@ class PhotonicGlassMCSimulator2:
     # ==========================================
     # [그룹 2] 경계면 및 표면 거칠기(Fresnel & Roughness) 로직
     # ==========================================
-    def _calculate_fresnel(self, n_i, n_t, cos_theta_i):
+    def _calculate_fresnel_refl(self, n_i, n_t, cos_theta_i):
         """
         Unpolarized Fresnel reflectance for an interface from medium i to medium t.
 
@@ -919,14 +920,19 @@ class PhotonicGlassMCSimulator2:
         
         # TIR condition
         if sin_theta_t >= 1.0:
-            return 1.0
+            return 1.0, 1.0, 1.0
         
         cos_theta_t = np.sqrt(max(0.0, 1 - sin_theta_t ** 2))
         r_s = (n_i * cos_theta_i - n_t * cos_theta_t) / (n_i * cos_theta_i + n_t * cos_theta_t)
         r_p = (n_i * cos_theta_t - n_t * cos_theta_i) / (n_i * cos_theta_t + n_t * cos_theta_i)
         
         R_f = 0.5 * (r_s**2 + r_p**2)
-        return R_f
+        return R_f, r_s**2, r_p**2
+    
+    def _calculate_fresnel_trans(self, n_i, n_t, cos_theta_i):
+        R_f, r_s, r_p = self._calculate_fresnel_refl(n_i, n_t, cos_theta_i)
+        T_f = 0.5 * ((1 - r_s) + (1 - r_p))
+        return T_f, 1-r_s, 1-r_p
     
     def _prepare_coarse_roughness_distribution(self, n_grid=500):
         r = float(self.coarse_roughness)
@@ -1231,7 +1237,7 @@ class PhotonicGlassMCSimulator2:
             # Sample exponential step size
             # 여기 한번 제대로 봐바
             rnd = max(np.random.rand(), 1e-300)
-            remaining = -np.log(rnd) * current_l_scat
+            remaining = -np.log(1-rnd) * current_l_scat
             
             while remaining > 1e-12:
                 ux, uy, uz = u
@@ -1395,8 +1401,7 @@ class PhotonicGlassMCSimulator2:
         theta_rot = np.arccos(kz0_rot/ np.sqrt(kx0_rot**2 + ky0_rot**2 + kz0_rot**2))
         phi_rot = np.arccos(kx0_rot/ np.sqrt(kx0_rot**2 + ky0_rot**2 + kz0_rot**2))
         # Refraction angle via Snell's Law
-        n_eff_real = np.real(n_sample_complex)
-        theta_refr = self.snell_refraction(theta_rot, self.n_medium, np.abs(n_eff_real))
+        theta_refr = self.snell_refraction(theta_rot, self.n_medium, np.abs(n_sample_complex))
         # z'축을 기준으로 굴절된 방향 계산 (theta_refr, phi_rot 이용)
         kx0_rot_refr = np.sin(theta_refr) * np.cos(phi_rot)
         ky0_rot_refr = np.sin(theta_refr) * np.sin(phi_rot)
@@ -1424,8 +1429,54 @@ class PhotonicGlassMCSimulator2:
         
         # N_photons, N_events에 대한 위치, 방향, 가중치를 저장 / coarse roughness에 의한 z'축 법선에 대한 입사각도, global 반사각을 저장
         return [position, direction, weight, kz0_rot, kz0_refl]
-       
-    def _run_single_wavelength_new(self, theta_array, n_eff_complex,
+    
+    def sample_angle(self, theta_array, cdf_phase, N_photons, N_events):
+        
+        rand_cdf = np.random.rand(N_events, N_photons)
+        scat_theta = np.interp(rand_cdf, cdf_phase, theta_array)
+        return scat_theta
+    
+    def retr_events(self, collection, indices):
+        collection = np.asarray(collection)
+        indices = np.asarray(indices)
+        
+        valid = indices > 0
+        valid_photon = np.where(valid)[0]
+        valid_event = indices[valid].astype(int) - 1
+    
+        events = np.zeros(indices.shape[0], dtype=collection.dtype)
+        if valid_event.size > 0:
+            events[valid_photon] = collection[valid_event, valid_photon]
+        
+        return events
+    
+    def fresnel_pass_frac(self, n_before, n_inside, n_after, cos_angles):
+        inc_pass_frac = []
+        for cos_theta_i in cos_angles:
+            T_f1, trans_s1, trans_p1 = self._calculate_fresnel_trans(n_before, n_inside, cos_theta_i)
+            T_f2, trans_s2, trans_p2 = self._calculate_fresnel_trans(n_inside, n_after, cos_theta_i)
+            fresnel_trans = (trans_s1 + trans_p1) * (trans_s2 + trans_p2) / 4.
+            
+            R_f1, refl_s1, refl_p1 = self._calculate_fresnel_refl(n_inside, n_after, cos_theta_i)
+            R_f2, refl_s2, refl_p2 = self._calculate_fresnel_refl(n_inside, n_before, cos_theta_i)
+            
+            fresnel_refl = (refl_s1 + refl_p1) * (refl_s2 + refl_p2) / 4.
+            
+            fresnel_pass_frac = fresnel_trans / (1 - fresnel_refl + 1.e-9)
+            inc_pass_frac.append(fresnel_pass_frac)
+        return np.asarray(inc_pass_frac, dtype=float)
+        
+    
+    def detect_angle_filter(self, kz_list, n_before, n_after, weight):
+        theta = np.arccos(kz_list)
+        theta_r = self.snell_refraction(theta, n_before, n_after)
+        theta_r[np.isnan(theta_r)] = np.inf
+        
+        filtered_weight = copy.deepcopy(weight)
+        filtered_weight[theta_r > self.detect_angle] = 0
+        return filtered_weight
+    
+    def _run_single_wavelength_new(self, theta_array, n_particle_complex, n_eff_complex,
                                mu_a, l_scat_norm, cdf_norm, l_scat_surf, cdf_surf, n_eff_real,
                                incident_angle=8.0, N_photons=20000, N_events=300, return_diagnostics=False):
         
@@ -1433,25 +1484,164 @@ class PhotonicGlassMCSimulator2:
         init = self.initialize(n_sample_complex=n_eff_complex,
                         N_photons=N_photons, N_events=N_events, incident_angle=incident_angle)
         
+        # position : (3, 301, 20000)
+        # direction : (3, 300, 20000)
+        # weight : (300, 20000)
         position, direction, weight, kz0_rot, kz0_refl = init
         
+        # sample angles : (299, 20000)
+        N_photons_mie = int(round(N_photons * self.fine_roughness))
+        sample_phi = 2* np.pi * np.random.rand(N_events-1, N_photons)
+        sample_theta = self.sample_angle(theta_array, cdf_norm, N_photons, N_events-1)
+        sample_sintheta = np.sin(sample_theta)
+        sample_costheta = np.cos(sample_theta)
+        sample_sinphi = np.sin(sample_phi)
+        sample_cosphi = np.cos(sample_phi)
         
+        # step length sampling
+        rand = np.random.rand(N_events, N_photons)
+        # step : (300, 20000)
+        step = -np.log(1.0-rand) * l_scat_norm
         
+        if self.fine_roughness > 0.0:
+            N_fine_photons = int(round(N_photons * self.fine_roughness))
+            rand_fine_photons = np.random.rand(N_fine_photons)
+            step[0,0:N_fine_photons] = -np.log(1.0 - rand_fine_photons) * l_scat_surf
+        
+        # weight sampling
+        weight = weight * np.exp(-mu_a * np.cumsum(step, axis=0))
+        
+        # direction sampling
+        # starts from index 1 cuz initial direction is already decided
+        for i in range(1, N_events):
+            direction[0, i, :] = (((direction[0, i - 1, :] * sample_costheta[i - 1, :]
+                            + direction[2, i - 1, :] * sample_sintheta[i - 1, :])
+                            * sample_cosphi[i - 1, :])
+                           - direction[1, i - 1, :] * sample_sinphi[i - 1, :])
+            direction[1, i, :] = (((direction[0, i - 1, :] * sample_costheta[i - 1, :]
+                            + direction[2, i - 1, :] * sample_sintheta[i - 1, :])
+                            * sample_sinphi[i - 1, :])
+                           + direction[1, i - 1, :] * sample_cosphi[i - 1, :])
+            direction[2, i, :] = (-direction[0, i - 1, :] * sample_sintheta[i - 1, :]
+                           + direction[2, i - 1, :] * sample_costheta[i - 1, :])
+        
+        # displacement : (3, 301, 20000)
+        displacement = np.zeros_like(position)
+        displacement[:, 1:, :] = direction * step[None, :, :]
+        position[0] = np.cumsum(displacement[0,:,:], axis=0)
+        position[1] = np.cumsum(displacement[1,:,:], axis=0)
+        position[2] = np.cumsum(displacement[2,:,:], axis=0)
+        
+        n_tir = (self.fine_roughness * n_particle_complex + (1 - self.fine_roughness) * n_eff_complex)
+        
+        kz = direction[2] # kz : (300, 20000)
+        z = position[2] # z : (301, 20000)
+        
+        # z_floors : (301, 20000)
+        # potential_exits : (300, 20000)
+        z_floors = np.floor(z / self.film_thickness) 
+        potential_exits = ~(np.diff(z_floors, axis=0) == 0) # z_floors의 값이 이웃끼리 다를 때, boundary 이동이 일어난 것이다
+        
+        no_tir = abs(kz) > np.cos(np.arcsin(self.n_medium/n_tir)) # tir을 하지 않을 방향으로 전진하는 kz들 
+        
+        pos_dir = np.mod(z_floors[:-1] + 1* (z_floors[1:] > z_floors[:-1]), 2).astype(bool) # z_floors가 짝수에서 홀수로 가거나 / 홀수에서 가만히 있거나
+        
+        # 흠 좀더 제대로 분석해야할듯... shape : (300, 20000)
+        exits_pos_dir = potential_exits & no_tir & pos_dir # boundary crossing인 동시에 tir 상황이 아니며 z_floors가 홀수로 향함 --> transmission 상황
+        exits_neg_dir = potential_exits & no_tir & ~pos_dir # boundary를 무조건 통과한다 근데 z_floors는 짝수로 향한다  --> reflection 상황
+        tir_refl_bool = potential_exits & ~no_tir.astype(bool) & ~pos_dir # boundary에서 전반사 된다. 이때 zfloors는 홀수에서 짝수를 향하고 있었다. 
+        
+        # exit들이 가장 먼저 일어나는 인덱스 찾기 shape : (20000)
+        low_event = np.argmax(np.vstack([np.zeros(N_photons), exits_neg_dir]), axis=0)
+        high_event = np.argmax(np.vstack([np.zeros(N_photons), exits_pos_dir]), axis=0)
 
+        # exit이 일어나지 않는 trajectory 찾기 --> n_event 안에 탈출하지 못한
+        no_low_exit = (low_event == 0)
+        no_high_exit = (high_event == 0)
         
+        low_smaller = (low_event < high_event)
         
+        low_first = no_high_exit | low_smaller # high exit 발생 X 또는 low_exit이 먼저 발생하기에 low_event가 우선권, 나가기만 하면 바로 대우해줄게
+        high_first = no_low_exit | (~low_smaller)
+        never_exit = no_low_exit & no_high_exit
         
+        # indices shape : (20000)
+        refl_indices = low_event * low_first
+        trans_indices = high_event * high_first
+        stuck_indices = never_exit * N_events
+        tir_indices = np.argmax(np.vstack([np.zeros(N_photons), tir_refl_bool]), axis=0)
         
+        init_dir = np.squeeze(kz0_rot)
+        inc_pass_frac = self.fresnel_pass_frac(self.n_medium, self.n_medium, n_tir, init_dir)
         
+        # 입사광의 계면 frensel 반사 및 투과에 의한 가중치 (필름에서 외부로 두드리는 광자량)
+        refl_weight = inc_pass_frac * self.retr_events(weight, refl_indices)
+        trans_weight = inc_pass_frac * self.retr_events(weight, trans_indices)
+        stuck_weight = inc_pass_frac * self.retr_events(weight, stuck_indices)
+        absorb_weight = (inc_pass_frac - refl_weight - trans_weight - stuck_weight)
         
+        # 계면을 두드린 광자 중 몇퍼센트만 뚫고 나가는가?
+        kz_refl_frac = self.retr_events(kz, refl_indices)
+        fresnel_pass_frac_refl = self.fresnel_pass_frac(n_tir, n_tir, self.n_medium, kz_refl_frac)
+        kz_trans_frac = self.retr_events(kz, trans_indices)
+        fresnel_pass_frac_trans = self.fresnel_pass_frac(n_tir, n_tir, self.n_medium, kz_trans_frac)
         
+        # 실제로 필름에서 바깥으로 나가는 광자량
+        refl_weight_pass = refl_weight * fresnel_pass_frac_refl
+        trans_weight_pass = trans_weight * fresnel_pass_frac_trans
         
+        # Fresnel 반사에 의해 필름 안에 남아버린 광자들
+        refl_fresnel = refl_weight - refl_weight_pass
+        trans_fresnel = trans_weight - trans_weight_pass
         
+        # N_photons에 의한 weight의 총 합
+        whole_outcome = np.sum(absorb_weight + refl_weight_pass + trans_weight_pass)
+        refl_frac = np.sum(refl_weight_pass) / whole_outcome
+        trans_frac = np.sum(trans_weight_pass) / whole_outcome
         
-            
-            
+        inc_refl = (1 - inc_pass_frac)
+        kz0_refl = np.squeeze(kz0_refl)
+        angle_kz0_refl = np.arccos(kz0_refl) # 반사 각도
+        inc_refl_detected = inc_refl
+        # 반사각이 0보다 작으면 받지 않음, 입사 중 튕겨나간 부분
+        inc_refl_detected[angle_kz0_refl < (np.pi - self.detect_angle)] = 0 
+        
+        # 필름 바깥으로 나간 빛 중 detect angle 안이라서 채집된 빛들
+        trans_detected = self.detect_angle_filter(kz_trans_frac, n_eff_complex, self.n_medium, trans_weight_pass)
+        refl_detected = self.detect_angle_filter(kz_refl_frac, n_eff_complex, self.n_medium, refl_weight_pass)
+        
+        trans_det_frac = (np.max([np.sum(trans_detected), 1e-9]) / np.max([np.sum(trans_weight_pass), 1e-9]))
+        refl_det_frac = (np.max([np.sum(refl_detected), 1e-9]) / np.max([np.sum(refl_weight_pass), 1e-9]))
+        
+        total_stuck = np.sum(refl_fresnel + trans_fresnel + stuck_weight)
+        
+        extra_refl = (refl_fresnel * refl_frac + trans_fresnel * trans_frac + stuck_weight * 0.5)
+        extra_trans = (trans_fresnel * refl_frac + refl_fresnel * trans_frac + stuck_weight * 0.5)
+        
+        trans_weight = trans_detected + extra_trans * trans_det_frac
+        refl_weight = (refl_detected + extra_refl * refl_det_frac + inc_refl_detected)
+        
+        refl_per_traj = refl_weight / N_photons
+        trans_per_traj = trans_weight / N_photons
 
-    
+        # sum to calculate reflectance and transmittance
+        transmittance = np.sum(trans_per_traj)
+        reflectance = np.sum(refl_per_traj)
+        
+        if return_diagnostics:
+            diag = {
+                "refl_per_traj": refl_per_traj,
+                "trans_per_traj": trans_per_traj,
+                "total_stuck": float(total_stuck),
+                "num_refl": int(np.count_nonzero(refl_indices)),
+                "num_trans": int(np.count_nonzero(trans_indices)),
+                "num_stuck": int(np.count_nonzero(stuck_indices)),
+                "mean_refl_weight": float(np.mean(refl_weight)),
+                "mean_trans_weight": float(np.mean(trans_weight)),
+            }
+            return reflectance, transmittance, 1-reflectance -transmittance, diag
+
+        return reflectance, transmittance, refl_per_traj, trans_per_traj
         
          
     def _run_single_wavelength(self, N_photons, theta_array, 
@@ -1588,8 +1778,9 @@ class PhotonicGlassMCSimulator2:
             l_scat_surf = self._get_l_scat(csca_mie, radius_samples=radius_samples, size_pdf=size_pdf)
             
             if return_diagnostics:
-                R, T, A, diag = self._run_single_wavelength(
-                    n_eff_comlex=n_eff_complex,
+                R, T, A, diag = self._run_single_wavelength_new(
+                    n_particle_complex=n_p_complex,
+                    n_eff_complex=n_eff_complex,
                     N_photons=N_photons,
                     theta_array=theta_array,
                     mu_a=mu_a,
@@ -1612,7 +1803,9 @@ class PhotonicGlassMCSimulator2:
                 })
                 diagnostics_all.append(diag)
             else:
-                R, T = self._run_single_wavelength(
+                R, T, _, _ = self._run_single_wavelength_new(
+                    n_particle_complex=n_p_complex,
+                    n_eff_complex=n_eff_complex,
                     N_photons=N_photons,
                     theta_array=theta_array,
                     mu_a=mu_a,
@@ -1639,7 +1832,7 @@ class PhotonicGlassMCSimulator2:
                 wavelengths=np.asarray(wvls),
                 reflectance=reflectance,
                 transmittance=transmittance,
-                absorbance=absorbance,
+                #absorbance=absorbance,
                 diagnostics=np.array(diagnostics_all, dtype=object) if return_diagnostics else None,
             )
             print(f"{save_filename}.npz is successfully saved!")
@@ -1737,19 +1930,19 @@ if __name__=="__main__":
     theta_array = np.linspace(1e-4, np.pi, 1000)    # radians
     theta_deg = np.degrees(theta_array)  
 
-    R, T, A, diags = sim.run_simulation(
+    R, T, _, _ = sim.run_simulation(
         wvls=wvl_array,
         theta_array=theta_array,
         N_photons=1000,
         backend="internal",
         use_polydispersity=False,
-        return_diagnostics=True,
+        return_diagnostics=False,
     )
 
     plt.figure(figsize=(7, 4))
     plt.plot(wvl_array * 1000, R, label="R")
     plt.plot(wvl_array * 1000, T, label="T")
-    plt.plot(wvl_array * 1000, A, label="A")
+    #plt.plot(wvl_array * 1000, A, label="A")
     plt.xlabel("Wavelength [nm]")
     plt.ylabel("Fraction")
     plt.title("MC spectrum test: 77 µm film")
